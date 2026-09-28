@@ -6,6 +6,29 @@ pub const signature = @import("signature");
 pub const packer = @import("packer");
 pub const unpacker = @import("unpacker");
 
+pub const OpenResult = struct {
+    header: header.Header,
+    info: []const u8,
+    data: []const u8,
+    signature: ?[]const u8,
+};
+
+pub fn open(bytes: []const u8) !OpenResult {
+    const h = try header.parseChecked(bytes, bytes.len);
+    const info = bytes[header.HeaderSize .. header.HeaderSize + h.info_size];
+    const start: usize = @intCast(h.data_offset);
+    if (h.sig_size == 0) {
+        return .{ .header = h, .info = info, .data = bytes[start..], .signature = null };
+    }
+    const so: usize = @intCast(h.sig_offset);
+    return .{
+        .header = h,
+        .info = info,
+        .data = bytes[start..so],
+        .signature = bytes[so .. so + header.SignatureSize],
+    };
+}
+
 test "packer.write writes header, info and data in order" {
     const info = "name = \"demo\"\n";
     const data = "compressed-bytes";

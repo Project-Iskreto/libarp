@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
     });
     cabi_mod.addImport("header", header);
     cabi_mod.addImport("checksum", checksum);
+    cabi_mod.addImport("signature", signature);
     cabi_mod.addImport("packer", packer);
     cabi_mod.addImport("unpacker", unpacker);
 

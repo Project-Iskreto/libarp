@@ -3,11 +3,13 @@ const header = @import("header");
 const packer = @import("packer");
 const unpacker = @import("unpacker");
 const checksum = @import("checksum");
+const signature = @import("signature");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const c = @cImport({
     @cInclude("stdio.h");
+    @cInclude("stdlib.h");
 });
 
 pub const Err = enum(c_int) {
@@ -42,6 +44,22 @@ pub const CHeader = extern struct {
     reserved: [26]u8,
 };
 
+pub const CPackage = struct {
+    bytes: [*]u8,
+    len: usize,
+    header: CHeader,
+    data_off: usize,
+    data_len: usize,
+    sig_off: usize,
+    sig_len: u32,
+};
+
+pub const CVerifyStatus = enum(c_int) {
+    unsigned = 0,
+    invalid = 1,
+    valid = 2,
+};
+
 fn codeOf(e: anyerror) Err {
     return switch (e) {
         error.BadArg => .bad_arg,
@@ -58,6 +76,9 @@ fn codeOf(e: anyerror) Err {
         error.SigSizeBad => .sig_size_bad,
         error.SigOutOfBounds => .sig_out_of_bounds,
         error.BadChecksum => .bad_checksum,
+        error.BadSignature => .bad_signature,
+        error.Unsigned => .unsigned,
+        error.UntrustedKey => .untrusted_key,
         else => .unknown,
     };
 }
@@ -85,15 +106,31 @@ export fn arp_pack_mem(
     const ip = info orelse return .bad_arg;
     const dp = data orelse return .bad_arg;
     const op = out orelse return .bad_arg;
-    packMemInternal(ip[0..info_len], dp[0..data_len], op[0..out_cap]) catch |e| return codeOf(e);
+    packMemInternal(ip[0..info_len], dp[0..data_len], op[0..out_cap], true) catch |e| return codeOf(e);
     return .ok;
 }
 
-fn packMemInternal(info: []const u8, data: []const u8, out: []u8) !void {
+export fn arp_pack_mem_ex(
+    info: ?[*]const u8,
+    info_len: usize,
+    data: ?[*]const u8,
+    data_len: usize,
+    out: ?[*]u8,
+    out_cap: usize,
+    opts: ?*const CPackOpts,
+) Err {
+    const ip = info orelse return .bad_arg;
+    const dp = data orelse return .bad_arg;
+    const op = out orelse return .bad_arg;
+    packMemInternal(ip[0..info_len], dp[0..data_len], op[0..out_cap], optWriteChecksum(opts)) catch |e| return codeOf(e);
+    return .ok;
+}
+
+fn packMemInternal(info: []const u8, data: []const u8, out: []u8, write_checksum: bool) !void {
     const total = try computeTotal(info.len, data.len);
     if (out.len < total) return error.BufferTooSmall;
     var w = std.Io.Writer.fixed(out[0..total]);
-    _ = try packer.write(&w, info, data, .{});
+    _ = try packer.write(&w, info, data, .{ .write_checksum = write_checksum });
 }
 
 export fn arp_pack_stream(
@@ -103,11 +140,35 @@ export fn arp_pack_stream(
     data_path: [*:0]const u8,
 ) Err {
     const ip = info orelse return .bad_arg;
-    packStreamInternal(out_path, ip[0..info_len], data_path) catch |e| return codeOf(e);
+    packStreamInternal(out_path, ip[0..info_len], data_path, true) catch |e| return codeOf(e);
     return .ok;
 }
 
-fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0]const u8) !void {
+pub const CPackOpts = extern struct {
+    abi_version: u32,
+    write_checksum: u32,
+    reserved: [6]u32,
+};
+
+fn optWriteChecksum(opts: ?*const CPackOpts) bool {
+    const o = opts orelse return true;
+    if (o.abi_version != 1) return true;
+    return o.write_checksum != 0;
+}
+
+export fn arp_pack_stream_ex(
+    out_path: [*:0]const u8,
+    info: ?[*]const u8,
+    info_len: usize,
+    data_path: [*:0]const u8,
+    opts: ?*const CPackOpts,
+) Err {
+    const ip = info orelse return .bad_arg;
+    packStreamInternal(out_path, ip[0..info_len], data_path, optWriteChecksum(opts)) catch |e| return codeOf(e);
+    return .ok;
+}
+
+fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0]const u8, write_checksum: bool) !void {
     if (info.len > std.math.maxInt(u32)) return error.InfoTooLarge;
 
     const fout = c.fopen(out_path, "wb") orelse return error.OpenFailed;
@@ -129,7 +190,7 @@ fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0
         return error.IOFailed;
 
     var sha = Sha256.init(.{});
-    sha.update(info);
+    if (write_checksum) sha.update(info);
 
     const fin = c.fopen(data_path, "rb") orelse return error.OpenFailed;
     defer _ = c.fclose(fin);
@@ -142,9 +203,10 @@ fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0
             break;
         }
         if (@as(usize, @intCast(c.fwrite(&buf, 1, n, fout))) != n) return error.IOFailed;
-        sha.update(buf[0..n]);
+        if (write_checksum) sha.update(buf[0..n]);
     }
 
+    if (!write_checksum) return;
     const got = sha.finalResult();
     if (c.fseek(fout, 30, c.SEEK_SET) != 0) return error.IOFailed;
     if (@as(usize, @intCast(c.fwrite(&got, 1, 8, fout))) != 8) return error.IOFailed;
@@ -174,6 +236,209 @@ export fn arp_header_parse(
         .reserved = h.reserved,
     };
     return .ok;
+}
+
+export fn arp_open(path: [*:0]const u8, out: ?*?*CPackage) Err {
+    const o = out orelse return .bad_arg;
+    o.* = null;
+    const pkg = openInternal(path) catch |e| return codeOf(e);
+    o.* = pkg;
+    return .ok;
+}
+
+fn openInternal(path: [*:0]const u8) !*CPackage {
+    const f = c.fopen(path, "rb") orelse return error.OpenFailed;
+    defer _ = c.fclose(f);
+
+    if (c.fseek(f, 0, c.SEEK_END) != 0) return error.IOFailed;
+    const ft = c.ftell(f);
+    if (ft < 0) return error.IOFailed;
+    const len: usize = @intCast(ft);
+    if (len < header.HeaderSize) return error.Truncated;
+    if (c.fseek(f, 0, c.SEEK_SET) != 0) return error.IOFailed;
+
+    const raw = c.malloc(len) orelse return error.Overflow;
+    errdefer c.free(raw);
+    const bytes: [*]u8 = @ptrCast(raw);
+
+    var off: usize = 0;
+    while (off < len) {
+        const n: usize = @intCast(c.fread(@ptrCast(bytes + off), 1, len - off, f));
+        if (n == 0) return error.Truncated;
+        off += n;
+    }
+
+    const buf = bytes[0..len];
+    const h = try header.parseChecked(buf, len);
+    const end: usize = if (h.sig_size != 0) @intCast(h.sig_offset) else len;
+    const data_off: usize = @intCast(h.data_offset);
+
+    const pkg_raw = c.malloc(@sizeOf(CPackage)) orelse return error.Overflow;
+    const pkg: *CPackage = @ptrCast(@alignCast(pkg_raw));
+    pkg.* = .{
+        .bytes = bytes,
+        .len = len,
+        .header = .{
+            .version = h.version,
+            .info_size = h.info_size,
+            .data_offset = h.data_offset,
+            .sig_offset = h.sig_offset,
+            .sig_size = h.sig_size,
+            .checksum = h.checksum,
+            .reserved = h.reserved,
+        },
+        .data_off = data_off,
+        .data_len = end - data_off,
+        .sig_off = if (h.sig_size != 0) @intCast(h.sig_offset) else 0,
+        .sig_len = h.sig_size,
+    };
+    return pkg;
+}
+
+export fn arp_free(pkg: ?*CPackage) void {
+    const p = pkg orelse return;
+    c.free(@ptrCast(p.bytes));
+    c.free(p);
+}
+
+export fn arp_package_header(pkg: ?*const CPackage) ?*const CHeader {
+    const p = pkg orelse return null;
+    return &p.header;
+}
+
+export fn arp_package_info(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
+    const p = pkg orelse return null;
+    if (len) |l| l.* = p.header.info_size;
+    return p.bytes + header.HeaderSize;
+}
+
+export fn arp_package_data(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
+    const p = pkg orelse return null;
+    if (len) |l| l.* = p.data_len;
+    return p.bytes + p.data_off;
+}
+
+export fn arp_package_signature(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
+    const p = pkg orelse return null;
+    if (p.sig_len == 0) {
+        if (len) |l| l.* = 0;
+        return null;
+    }
+    if (len) |l| l.* = p.sig_len;
+    return p.bytes + p.sig_off;
+}
+
+export fn arp_check_checksum(pkg: ?*CPackage) Err {
+    const p = pkg orelse return .bad_arg;
+    const buf = p.bytes[0..p.len];
+    const info = buf[header.HeaderSize .. header.HeaderSize + p.header.info_size];
+    if (!checksum.matches(p.header.checksum, info, buf[p.data_off .. p.data_off + p.data_len])) {
+        return .bad_checksum;
+    }
+    return .ok;
+}
+
+export fn arp_package_key_id(pkg: ?*const CPackage, out: ?*[8]u8) Err {
+    const p = pkg orelse return .bad_arg;
+    const o = out orelse return .bad_arg;
+    if (p.sig_len == 0) return .unsigned;
+    const blob = signature.parse(p.bytes[p.sig_off .. p.sig_off + p.sig_len]) catch
+        return .bad_signature;
+    o.* = blob.key_id;
+    return .ok;
+}
+
+fn toStatus(s: signature.VerifyStatus) CVerifyStatus {
+    return switch (s) {
+        .unsigned => .unsigned,
+        .invalid => .invalid,
+        .valid => .valid,
+    };
+}
+
+export fn arp_verify_pkg(pkg: ?*CPackage, status: ?*CVerifyStatus, out_key_id: ?*[8]u8) Err {
+    const p = pkg orelse return .bad_arg;
+    const st = status orelse return .bad_arg;
+    const r = signature.verify(p.bytes[0..p.len]);
+    st.* = toStatus(r.status);
+    if (out_key_id) |k| k.* = r.key_id orelse [_]u8{0} ** 8;
+    return .ok;
+}
+
+export fn arp_verify_mem(bytes: ?[*]const u8, len: usize, status: ?*CVerifyStatus, out_key_id: ?*[8]u8) Err {
+    const b = bytes orelse return .bad_arg;
+    const st = status orelse return .bad_arg;
+    if (len < header.HeaderSize) return .truncated;
+    const r = signature.verify(b[0..len]);
+    st.* = toStatus(r.status);
+    if (out_key_id) |k| k.* = r.key_id orelse [_]u8{0} ** 8;
+    return .ok;
+}
+
+export fn arp_verify_file(path: [*:0]const u8, trusted_dir: ?[*:0]const u8) Err {
+    var pkg: ?*CPackage = null;
+    const rc = arp_open(path, &pkg);
+    if (rc != .ok) return rc;
+    defer arp_free(pkg);
+
+    var st: CVerifyStatus = .invalid;
+    var kid: [8]u8 = [_]u8{0} ** 8;
+    const vr = arp_verify_pkg(pkg, &st, &kid);
+    if (vr != .ok) return vr;
+    return policy(st, kid, trusted_dir);
+}
+
+fn policy(st: CVerifyStatus, kid: [8]u8, trusted_dir: ?[*:0]const u8) Err {
+    return switch (st) {
+        .unsigned => .unsigned,
+        .invalid => .bad_signature,
+        .valid => blk: {
+            if (trusted_dir) |dir| {
+                if (!keyInDir(dir, kid)) break :blk .untrusted_key;
+            }
+            break :blk .ok;
+        },
+    };
+}
+
+fn keyInDir(dir: [*:0]const u8, key_id: [8]u8) bool {
+    var buf: [4096]u8 = undefined;
+    var i: usize = 0;
+    while (dir[i] != 0) : (i += 1) {
+        if (i + 17 >= buf.len) return false;
+        buf[i] = dir[i];
+    }
+    buf[i] = '/';
+    i += 1;
+    const hex = std.fmt.bytesToHex(key_id, .lower);
+    @memcpy(buf[i .. i + 16], &hex);
+    i += 16;
+    buf[i] = 0;
+    const p: [*:0]const u8 = @ptrCast(&buf);
+    const f = c.fopen(p, "rb") orelse return false;
+    _ = c.fclose(f);
+    return true;
+}
+
+export fn arp_verify_detached(
+    blob: ?[*]const u8,
+    blob_len: usize,
+    data: ?[*]const u8,
+    data_len: usize,
+    trusted_dir: ?[*:0]const u8,
+) Err {
+    const b = blob orelse return .bad_arg;
+    const d = data orelse return .bad_arg;
+    const r = signature.verifyDetached(b[0..blob_len], d[0..data_len]);
+    return switch (r.status) {
+        .unsigned, .invalid => .bad_signature,
+        .valid => blk: {
+            if (trusted_dir) |dir| {
+                if (!keyInDir(dir, r.key_id orelse [_]u8{0} ** 8)) break :blk .untrusted_key;
+            }
+            break :blk .ok;
+        },
+    };
 }
 
 export fn arp_unpack_stream(
