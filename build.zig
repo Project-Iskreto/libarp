@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
     unpacker.addImport("checksum", checksum);
     verifier.addImport("header", header);
     signature.addImport("header", header);
+    signature.addImport("checksum", checksum);
 
     const libarp_mod = b.addModule("libarp", .{
         .root_source_file = b.path("src/libarp.zig"),

@@ -13,26 +13,34 @@ An ARP (Advanced Release Package) write and read library.
 │   - version: u16 (current = 1)                  │
 │   - info_size: u32                              │
 │   - data_offset: u64                            │
-│   - sig_offset: u64 (reserved)                  │
-│   - sig_size: u32 (reserved)                    │
-│   - checksum: [8]u8 (reserved)                  │
-│   - reserved: [26]u8 (reserved)                 │
+│   - sig_offset: u64 (0 = unsigned)              │
+│   - sig_size: u32 (109 or 0)                    │
+│   - checksum: [8]u8 (sha256(info||data)[0..8])  │
+│   - reserved: [26]u8 (all zero)                 │
 ├─────────────────────────────────────────────────┤
 │ Offset 64: .info metadata (TOML-like text)      │
 │   Length = info_size                            │
 ├─────────────────────────────────────────────────┤
 │ Offset data_offset: bin.tar.zst compressed data │
-│   Length = file size - data_offset              │
+│   Length = (sig_offset or EOF) - data_offset    │
+├─────────────────────────────────────────────────┤
+│ Offset sig_offset: 109-byte Ed25519 signature   │
+│   Length = sig_size  (signed packages only)     │
 └─────────────────────────────────────────────────┘
 ```
 
+The checksum covers `.info` and `data`.
+The signature covers `file[0..sig_offset)`.
+
 ## Features
 
-- Parse the 64-byte header (little-endian, with bounds checking)
+- Parse the 64-byte header with strict format and bounds checking
 - Serialize a header into a byte array
 - Pack: header + `.info` + data into an `.arp` file
 - Unpack: `.arp` file into header + `.info` + data
-- Signature and integrity verification will be supported in the future
+- Integrity: compute and verify `sha256(info || data)[0..8]`
+- Authenticity: parse and verify 109-byte Ed25519 signatures
+- Sign: append a 109-byte Ed25519 signature
 
 ## C API
 

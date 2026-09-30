@@ -13,18 +13,24 @@
 │   - version: u16（当前 = 1）           │
 │   - info_size: u32                     │
 │   - data_offset: u64                   │
-│   - sig_offset: u64（预留）            │
-│   - sig_size: u32（预留）              │
-│   - checksum: [8]u8（预留）            │
-│   - reserved: [26]u8（预留）           │
+│   - sig_offset: u64（0 = 未签名）      │
+│   - sig_size: u32（109 或 0）          │
+│   - checksum: [8]u8（sha256 前 8B）    │
+│   - reserved: [26]u8（全 0）           │
 ├────────────────────────────────────────┤
 │ 偏移 64：.info 元数据（类 TOML 文本）  │
 │   长度 = info_size                     │
 ├────────────────────────────────────────┤
 │ 偏移 data_offset：bin.tar.zst 压缩数据 │
-│   长度 = 文件大小 - data_offset        │
+│   长度 = sig_offset - data_offset      │
+├────────────────────────────────────────┤
+│ 偏移 sig_offset：Ed25519 签名区        │
+│   长度 = sig_size（仅签名包）          │
 └────────────────────────────────────────┘
 ```
+
+checksum 覆盖 `.info` 与 `data`。
+签名覆盖 `file[0..sig_offset)`。
 
 ## 功能
 
@@ -32,7 +38,9 @@
 - 将 Header 序列化为字节数组
 - 打包：把 Header、`.info` 和数据段组装成 `.arp` 文件
 - 解包：从 `.arp` 文件还原 Header、`.info` 和数据段
-- 后续支持签名与完整性校验
+- 完整性：计算/校验 `sha256(info || data)[0..8]`
+- 真实性：解析并校验 109 字节 Ed25519 签名
+- 签名：写入 109 字节 Ed25519 签名
 
 ## C 接口
 
@@ -44,7 +52,7 @@ if (arp_open("pkg.arp", &pkg) != ARP_OK) { /* ... */ }
 size_t ilen, dlen, slen;
 const void *info    = arp_package_info(pkg, &ilen);
 const void *data    = arp_package_data(pkg, &dlen);
-const void *sigblob = arp_package_signature(pkg, &slen); /* 未签名时为 NULL */
+const void *sigblob = arp_package_signature(pkg, &slen);
 uint8_t key_id[8];
 arp_package_key_id(pkg, key_id);
 arp_free(pkg);

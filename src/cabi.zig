@@ -31,6 +31,7 @@ pub const Err = enum(c_int) {
     data_offset_mismatch = 15,
     sig_size_bad = 16,
     sig_out_of_bounds = 17,
+    already_signed = 18,
     unknown = 99,
 };
 
@@ -79,6 +80,7 @@ fn codeOf(e: anyerror) Err {
         error.BadSignature => .bad_signature,
         error.Unsigned => .unsigned,
         error.UntrustedKey => .untrusted_key,
+        error.AlreadySigned => .already_signed,
         else => .unknown,
     };
 }
@@ -439,6 +441,44 @@ export fn arp_verify_detached(
             break :blk .ok;
         },
     };
+}
+
+export fn arp_sign_file(path: [*:0]const u8, seed: ?[*]const u8) Err {
+    const s = seed orelse return .bad_arg;
+    signFileInternal(path, s[0..32].*) catch |e| return codeOf(e);
+    return .ok;
+}
+
+fn signFileInternal(path: [*:0]const u8, seed: [32]u8) !void {
+    const input = try readPathBytes(path, std.heap.c_allocator);
+    defer std.heap.c_allocator.free(input);
+    const signed_bytes = try signature.sign(std.heap.c_allocator, input, seed);
+    defer std.heap.c_allocator.free(signed_bytes);
+    try writePathBytes(path, signed_bytes);
+}
+
+export fn arp_sign_mem(
+    in: ?[*]const u8,
+    in_len: usize,
+    out: ?[*]u8,
+    out_cap: usize,
+    out_len: ?*usize,
+    seed: ?[*]const u8,
+) Err {
+    const ip = in orelse return .bad_arg;
+    const op = out orelse return .bad_arg;
+    const ol = out_len orelse return .bad_arg;
+    const s = seed orelse return .bad_arg;
+    signMemInternal(ip[0..in_len], op[0..out_cap], s[0..32].*, ol) catch |e| return codeOf(e);
+    return .ok;
+}
+
+fn signMemInternal(input: []const u8, out: []u8, seed: [32]u8, out_len: *usize) !void {
+    const signed_bytes = try signature.sign(std.heap.c_allocator, input, seed);
+    defer std.heap.c_allocator.free(signed_bytes);
+    if (out.len < signed_bytes.len) return error.BufferTooSmall;
+    @memcpy(out[0..signed_bytes.len], signed_bytes);
+    out_len.* = signed_bytes.len;
 }
 
 export fn arp_unpack_stream(

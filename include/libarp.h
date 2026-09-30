@@ -27,6 +27,7 @@ enum arp_err {
     ARP_ERR_DATA_OFFSET_MISMATCH = 15,
     ARP_ERR_SIG_SIZE_BAD = 16,
     ARP_ERR_SIG_OUT_OF_BOUNDS = 17,
+    ARP_ERR_ALREADY_SIGNED = 18,
     ARP_ERR_UNKNOWN = 99,
 };
 
@@ -101,6 +102,11 @@ enum arp_err arp_pack_stream_ex(const char *out_path,
                                 const void *info, size_t info_len,
                                 const char *data_path,
                                 const struct arp_pack_opts *opts);
+
+enum arp_err arp_sign_file(const char *path, const uint8_t seed[32]);
+enum arp_err arp_sign_mem(const void *in, size_t in_len,
+                          void *out, size_t out_cap, size_t *out_len,
+                          const uint8_t seed[32]);
 
 #ifdef __cplusplus
 }
