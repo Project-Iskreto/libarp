@@ -77,7 +77,8 @@ arp_verify_pkg(pkg, &st, kid);
 
 ## Limitations
 
-- `arp_open` reads the entire package into memory; large packages (hundreds of MB) are memory-heavy. mmap / streaming is planned.
+- `arp_open` memory-maps the package (POSIX `mmap`) instead of copying it into memory, so opening large packages does not allocate proportionally to file size. The mapping is released by `arp_free`.
+- Verifying a signed package reads the whole message (Ed25519 hashes `file[0..sig_offset)`); this faults in the mapped pages but does not allocate a second copy.
 - Zig: `open(bytes)` is a zero-copy view (no allocator); the caller must keep `bytes` alive. `unpack` is the streaming/copying entry point whose `UnpackResult.info` is allocated and owned by the caller.
 
 ## License

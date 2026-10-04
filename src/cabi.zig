@@ -10,6 +10,10 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("stdlib.h");
+    @cInclude("fcntl.h");
+    @cInclude("unistd.h");
+    @cInclude("sys/mman.h");
+    @cInclude("sys/stat.h");
 });
 
 pub const Err = enum(c_int) {
@@ -48,6 +52,7 @@ pub const CHeader = extern struct {
 pub const CPackage = struct {
     bytes: [*]u8,
     len: usize,
+    fd: c_int,
     header: CHeader,
     data_off: usize,
     data_len: usize,
@@ -249,26 +254,19 @@ export fn arp_open(path: [*:0]const u8, out: ?*?*CPackage) Err {
 }
 
 fn openInternal(path: [*:0]const u8) !*CPackage {
-    const f = c.fopen(path, "rb") orelse return error.OpenFailed;
-    defer _ = c.fclose(f);
+    const fd = c.open(path, c.O_RDONLY);
+    if (fd < 0) return error.OpenFailed;
+    errdefer _ = c.close(fd);
 
-    if (c.fseek(f, 0, c.SEEK_END) != 0) return error.IOFailed;
-    const ft = c.ftell(f);
-    if (ft < 0) return error.IOFailed;
-    const len: usize = @intCast(ft);
+    var st: c.struct_stat = undefined;
+    if (c.fstat(fd, &st) != 0) return error.IOFailed;
+    const len: usize = @intCast(st.st_size);
     if (len < header.HeaderSize) return error.Truncated;
-    if (c.fseek(f, 0, c.SEEK_SET) != 0) return error.IOFailed;
 
-    const raw = c.malloc(len) orelse return error.Overflow;
-    errdefer c.free(raw);
-    const bytes: [*]u8 = @ptrCast(raw);
-
-    var off: usize = 0;
-    while (off < len) {
-        const n: usize = @intCast(c.fread(@ptrCast(bytes + off), 1, len - off, f));
-        if (n == 0) return error.Truncated;
-        off += n;
-    }
+    const raw = c.mmap(null, len, c.PROT_READ, c.MAP_PRIVATE, fd, 0);
+    if (raw == c.MAP_FAILED) return error.IOFailed;
+    errdefer _ = c.munmap(raw, len);
+    const bytes: [*]u8 = @ptrCast(raw.?);
 
     const buf = bytes[0..len];
     const h = try header.parseChecked(buf, len);
@@ -280,6 +278,7 @@ fn openInternal(path: [*:0]const u8) !*CPackage {
     pkg.* = .{
         .bytes = bytes,
         .len = len,
+        .fd = fd,
         .header = .{
             .version = h.version,
             .info_size = h.info_size,
@@ -299,7 +298,8 @@ fn openInternal(path: [*:0]const u8) !*CPackage {
 
 export fn arp_free(pkg: ?*CPackage) void {
     const p = pkg orelse return;
-    c.free(@ptrCast(p.bytes));
+    _ = c.munmap(@ptrCast(p.bytes), p.len);
+    _ = c.close(p.fd);
     c.free(p);
 }
 

@@ -77,7 +77,8 @@ arp_verify_pkg(pkg, &st, kid);
 
 ## 限制
 
-- `arp_open` 全量读入内存；大包（数百 MB）有压力，后续用 mmap / 流式。
+- `arp_open` 用 **mmap**（POSIX）映射文件，不再复制进内存；打开大包不会按文件大小分配内存。映射由 `arp_free` 解除。
+- 验证签名包仍需读取整段消息（Ed25519 哈希 `file[0..sig_offset)`），会触发映射页的缺页，但不会额外分配一份拷贝。
 - Zig：`open(bytes)` 为零拷贝视图（无分配器），调用方需保证 `bytes` 存活；`unpack` 是流式/拷贝入口，`UnpackResult.info` 由调用方分配并负责释放。
 
 ## 许可证
