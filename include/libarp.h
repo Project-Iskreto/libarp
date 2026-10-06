@@ -28,6 +28,8 @@ enum arp_err {
     ARP_ERR_SIG_SIZE_BAD = 16,
     ARP_ERR_SIG_OUT_OF_BOUNDS = 17,
     ARP_ERR_ALREADY_SIGNED = 18,
+    ARP_ERR_HOOKS_OFFSET_BAD = 19,
+    ARP_ERR_HOOKS_OUT_OF_BOUNDS = 20,
     ARP_ERR_UNKNOWN = 99,
 };
 
@@ -35,13 +37,15 @@ struct arp_header {
     uint16_t version;
     uint32_t info_size;
     uint64_t data_offset;
+    uint64_t hooks_offset;
     uint64_t sig_offset;
     uint32_t sig_size;
     uint8_t checksum[8];
-    uint8_t reserved[26];
+    uint8_t reserved[18];
 };
 
 size_t arp_pack_size(size_t info_len, size_t data_len);
+size_t arp_pack_size_ex(size_t info_len, size_t data_len, size_t hooks_len);
 
 enum arp_err arp_pack_mem(const void *info, size_t info_len,
                           const void *data, size_t data_len,
@@ -71,6 +75,7 @@ void arp_free(struct arp_package *pkg);
 const struct arp_header *arp_package_header(const struct arp_package *pkg);
 const void *arp_package_info(const struct arp_package *pkg, size_t *len);
 const void *arp_package_data(const struct arp_package *pkg, size_t *len);
+const void *arp_package_hooks(const struct arp_package *pkg, size_t *len);
 const void *arp_package_signature(const struct arp_package *pkg, size_t *len);
 enum arp_err arp_package_key_id(const struct arp_package *pkg, uint8_t out[8]);
 
@@ -95,12 +100,14 @@ struct arp_pack_opts {
 
 enum arp_err arp_pack_mem_ex(const void *info, size_t info_len,
                              const void *data, size_t data_len,
+                             const void *hooks, size_t hooks_len,
                              void *out, size_t out_cap,
                              const struct arp_pack_opts *opts);
 
 enum arp_err arp_pack_stream_ex(const char *out_path,
                                 const void *info, size_t info_len,
                                 const char *data_path,
+                                const char *hooks_path,
                                 const struct arp_pack_opts *opts);
 
 enum arp_err arp_sign_file(const char *path, const uint8_t seed[32]);

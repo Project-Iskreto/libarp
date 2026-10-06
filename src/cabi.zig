@@ -36,6 +36,8 @@ pub const Err = enum(c_int) {
     sig_size_bad = 16,
     sig_out_of_bounds = 17,
     already_signed = 18,
+    hooks_offset_bad = 19,
+    hooks_out_of_bounds = 20,
     unknown = 99,
 };
 
@@ -43,10 +45,11 @@ pub const CHeader = extern struct {
     version: u16,
     info_size: u32,
     data_offset: u64,
+    hooks_offset: u64,
     sig_offset: u64,
     sig_size: u32,
     checksum: [8]u8,
-    reserved: [26]u8,
+    reserved: [18]u8,
 };
 
 pub const CPackage = struct {
@@ -56,6 +59,8 @@ pub const CPackage = struct {
     header: CHeader,
     data_off: usize,
     data_len: usize,
+    hooks_off: usize,
+    hooks_len: usize,
     sig_off: usize,
     sig_len: u32,
 };
@@ -86,20 +91,27 @@ fn codeOf(e: anyerror) Err {
         error.Unsigned => .unsigned,
         error.UntrustedKey => .untrusted_key,
         error.AlreadySigned => .already_signed,
+        error.HooksOffsetBad => .hooks_offset_bad,
+        error.HooksOutOfBounds => .hooks_out_of_bounds,
         else => .unknown,
     };
 }
 
-fn computeTotal(info_len: usize, data_len: usize) !usize {
+fn computeTotal(info_len: usize, data_len: usize, hooks_len: usize) !usize {
     if (info_len > std.math.maxInt(u32)) return error.InfoTooLarge;
     const data_offset: u64 = header.HeaderSize + info_len;
-    const total = std.math.add(u64, data_offset, data_len) catch return error.Overflow;
+    var total = std.math.add(u64, data_offset, data_len) catch return error.Overflow;
+    total = std.math.add(u64, total, hooks_len) catch return error.Overflow;
     if (total > std.math.maxInt(usize)) return error.Overflow;
     return @intCast(total);
 }
 
 export fn arp_pack_size(info_len: usize, data_len: usize) usize {
-    return computeTotal(info_len, data_len) catch 0;
+    return computeTotal(info_len, data_len, 0) catch 0;
+}
+
+export fn arp_pack_size_ex(info_len: usize, data_len: usize, hooks_len: usize) usize {
+    return computeTotal(info_len, data_len, hooks_len) catch 0;
 }
 
 export fn arp_pack_mem(
@@ -113,7 +125,7 @@ export fn arp_pack_mem(
     const ip = info orelse return .bad_arg;
     const dp = data orelse return .bad_arg;
     const op = out orelse return .bad_arg;
-    packMemInternal(ip[0..info_len], dp[0..data_len], op[0..out_cap], true) catch |e| return codeOf(e);
+    packMemInternal(ip[0..info_len], dp[0..data_len], &.{}, op[0..out_cap], true) catch |e| return codeOf(e);
     return .ok;
 }
 
@@ -122,6 +134,8 @@ export fn arp_pack_mem_ex(
     info_len: usize,
     data: ?[*]const u8,
     data_len: usize,
+    hooks: ?[*]const u8,
+    hooks_len: usize,
     out: ?[*]u8,
     out_cap: usize,
     opts: ?*const CPackOpts,
@@ -129,15 +143,16 @@ export fn arp_pack_mem_ex(
     const ip = info orelse return .bad_arg;
     const dp = data orelse return .bad_arg;
     const op = out orelse return .bad_arg;
-    packMemInternal(ip[0..info_len], dp[0..data_len], op[0..out_cap], optWriteChecksum(opts)) catch |e| return codeOf(e);
+    const hooks_slice: []const u8 = if (hooks) |hp| hp[0..hooks_len] else &.{};
+    packMemInternal(ip[0..info_len], dp[0..data_len], hooks_slice, op[0..out_cap], optWriteChecksum(opts)) catch |e| return codeOf(e);
     return .ok;
 }
 
-fn packMemInternal(info: []const u8, data: []const u8, out: []u8, write_checksum: bool) !void {
-    const total = try computeTotal(info.len, data.len);
+fn packMemInternal(info: []const u8, data: []const u8, hooks: []const u8, out: []u8, write_checksum: bool) !void {
+    const total = try computeTotal(info.len, data.len, hooks.len);
     if (out.len < total) return error.BufferTooSmall;
     var w = std.Io.Writer.fixed(out[0..total]);
-    _ = try packer.write(&w, info, data, .{ .write_checksum = write_checksum });
+    _ = try packer.write(&w, info, data, hooks, .{ .write_checksum = write_checksum });
 }
 
 export fn arp_pack_stream(
@@ -147,7 +162,7 @@ export fn arp_pack_stream(
     data_path: [*:0]const u8,
 ) Err {
     const ip = info orelse return .bad_arg;
-    packStreamInternal(out_path, ip[0..info_len], data_path, true) catch |e| return codeOf(e);
+    packStreamInternal(out_path, ip[0..info_len], data_path, null, true) catch |e| return codeOf(e);
     return .ok;
 }
 
@@ -168,28 +183,42 @@ export fn arp_pack_stream_ex(
     info: ?[*]const u8,
     info_len: usize,
     data_path: [*:0]const u8,
+    hooks_path: ?[*:0]const u8,
     opts: ?*const CPackOpts,
 ) Err {
     const ip = info orelse return .bad_arg;
-    packStreamInternal(out_path, ip[0..info_len], data_path, optWriteChecksum(opts)) catch |e| return codeOf(e);
+    packStreamInternal(out_path, ip[0..info_len], data_path, hooks_path, optWriteChecksum(opts)) catch |e| return codeOf(e);
     return .ok;
 }
 
-fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0]const u8, write_checksum: bool) !void {
+fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0]const u8, hooks_path: ?[*:0]const u8, write_checksum: bool) !void {
     if (info.len > std.math.maxInt(u32)) return error.InfoTooLarge;
+
+    const fin = c.fopen(data_path, "rb") orelse return error.OpenFailed;
+    defer _ = c.fclose(fin);
+    const data_size = try fileSize(fin);
+
+    const hooks_file: ?*c.FILE = if (hooks_path) |hp| (c.fopen(hp, "rb") orelse return error.OpenFailed) else null;
+    defer if (hooks_file) |hf| {
+        _ = c.fclose(hf);
+    };
+    const hooks_size: usize = if (hooks_file) |hf| try fileSize(hf) else 0;
+
+    const data_offset: u64 = header.HeaderSize + info.len;
+    const h = header.Header{
+        .version = 1,
+        .info_size = @intCast(info.len),
+        .data_offset = data_offset,
+        .hooks_offset = if (hooks_size == 0) 0 else data_offset + data_size,
+        .sig_offset = 0,
+        .sig_size = 0,
+        .checksum = [_]u8{0} ** 8,
+        .reserved = [_]u8{0} ** 18,
+    };
 
     const fout = c.fopen(out_path, "wb") orelse return error.OpenFailed;
     defer _ = c.fclose(fout);
 
-    const h = header.Header{
-        .version = 1,
-        .info_size = @intCast(info.len),
-        .data_offset = header.HeaderSize + info.len,
-        .sig_offset = 0,
-        .sig_size = 0,
-        .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 26,
-    };
     const hdr_bytes = h.serialize();
     if (@as(usize, @intCast(c.fwrite(&hdr_bytes, 1, hdr_bytes.len, fout))) != hdr_bytes.len)
         return error.IOFailed;
@@ -199,24 +228,34 @@ fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0
     var sha = Sha256.init(.{});
     if (write_checksum) sha.update(info);
 
-    const fin = c.fopen(data_path, "rb") orelse return error.OpenFailed;
-    defer _ = c.fclose(fin);
+    try streamFile(fin, fout, &sha, write_checksum);
+    if (hooks_file) |hf| try streamFile(hf, fout, &sha, write_checksum);
 
+    if (!write_checksum) return;
+    const got = sha.finalResult();
+    if (c.fseek(fout, 38, c.SEEK_SET) != 0) return error.IOFailed;
+    if (@as(usize, @intCast(c.fwrite(&got, 1, 8, fout))) != 8) return error.IOFailed;
+}
+
+fn fileSize(f: *c.FILE) !usize {
+    if (c.fseek(f, 0, c.SEEK_END) != 0) return error.IOFailed;
+    const ft = c.ftell(f);
+    if (ft < 0) return error.IOFailed;
+    if (c.fseek(f, 0, c.SEEK_SET) != 0) return error.IOFailed;
+    return @intCast(ft);
+}
+
+fn streamFile(fin: *c.FILE, fout: *c.FILE, sha: *Sha256, hash: bool) !void {
     var buf: [64 * 1024]u8 = undefined;
     while (true) {
         const n: usize = @intCast(c.fread(&buf, 1, buf.len, fin));
         if (n == 0) {
             if (c.ferror(fin) != 0) return error.IOFailed;
-            break;
+            return;
         }
         if (@as(usize, @intCast(c.fwrite(&buf, 1, n, fout))) != n) return error.IOFailed;
-        if (write_checksum) sha.update(buf[0..n]);
+        if (hash) sha.update(buf[0..n]);
     }
-
-    if (!write_checksum) return;
-    const got = sha.finalResult();
-    if (c.fseek(fout, 30, c.SEEK_SET) != 0) return error.IOFailed;
-    if (@as(usize, @intCast(c.fwrite(&got, 1, 8, fout))) != 8) return error.IOFailed;
 }
 
 export fn arp_header_parse(
@@ -237,6 +276,7 @@ export fn arp_header_parse(
         .version = h.version,
         .info_size = h.info_size,
         .data_offset = h.data_offset,
+        .hooks_offset = h.hooks_offset,
         .sig_offset = h.sig_offset,
         .sig_size = h.sig_size,
         .checksum = h.checksum,
@@ -270,8 +310,9 @@ fn openInternal(path: [*:0]const u8) !*CPackage {
 
     const buf = bytes[0..len];
     const h = try header.parseChecked(buf, len);
-    const end: usize = if (h.sig_size != 0) @intCast(h.sig_offset) else len;
     const data_off: usize = @intCast(h.data_offset);
+    const content_end: usize = @intCast(h.contentEnd(len));
+    const data_end: usize = if (h.hooks_offset != 0) @intCast(h.hooks_offset) else content_end;
 
     const pkg_raw = c.malloc(@sizeOf(CPackage)) orelse return error.Overflow;
     const pkg: *CPackage = @ptrCast(@alignCast(pkg_raw));
@@ -283,13 +324,16 @@ fn openInternal(path: [*:0]const u8) !*CPackage {
             .version = h.version,
             .info_size = h.info_size,
             .data_offset = h.data_offset,
+            .hooks_offset = h.hooks_offset,
             .sig_offset = h.sig_offset,
             .sig_size = h.sig_size,
             .checksum = h.checksum,
             .reserved = h.reserved,
         },
         .data_off = data_off,
-        .data_len = end - data_off,
+        .data_len = data_end - data_off,
+        .hooks_off = if (h.hooks_offset != 0) data_end else 0,
+        .hooks_len = if (h.hooks_offset != 0) content_end - data_end else 0,
         .sig_off = if (h.sig_size != 0) @intCast(h.sig_offset) else 0,
         .sig_len = h.sig_size,
     };
@@ -320,6 +364,16 @@ export fn arp_package_data(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
     return p.bytes + p.data_off;
 }
 
+export fn arp_package_hooks(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
+    const p = pkg orelse return null;
+    if (p.hooks_len == 0) {
+        if (len) |l| l.* = 0;
+        return null;
+    }
+    if (len) |l| l.* = p.hooks_len;
+    return p.bytes + p.hooks_off;
+}
+
 export fn arp_package_signature(pkg: ?*const CPackage, len: ?*usize) ?[*]const u8 {
     const p = pkg orelse return null;
     if (p.sig_len == 0) {
@@ -334,7 +388,9 @@ export fn arp_check_checksum(pkg: ?*CPackage) Err {
     const p = pkg orelse return .bad_arg;
     const buf = p.bytes[0..p.len];
     const info = buf[header.HeaderSize .. header.HeaderSize + p.header.info_size];
-    if (!checksum.matches(p.header.checksum, info, buf[p.data_off .. p.data_off + p.data_len])) {
+    const data = buf[p.data_off .. p.data_off + p.data_len];
+    const hooks = if (p.hooks_len != 0) buf[p.hooks_off .. p.hooks_off + p.hooks_len] else buf[0..0];
+    if (!checksum.matches(p.header.checksum, info, data, hooks)) {
         return .bad_checksum;
     }
     return .ok;
@@ -525,31 +581,51 @@ fn unpackStreamInternal(arp_path: [*:0]const u8, data_out_path: [*:0]const u8) !
         skip -= n;
     }
 
-    if (h.sig_size != 0) {
-        var remaining: u64 = h.sig_offset - h.data_offset;
-        while (remaining > 0) {
-            const want: usize = @intCast(@min(remaining, buf.len));
-            const n: usize = @intCast(c.fread(&buf, 1, want, fin));
-            if (n == 0) return error.Truncated;
-            if (@as(usize, @intCast(c.fwrite(&buf, 1, n, fout))) != n) return error.IOFailed;
-            sha.update(buf[0..n]);
-            remaining -= n;
-        }
-    } else {
-        while (true) {
-            const n: usize = @intCast(c.fread(&buf, 1, buf.len, fin));
-            if (n == 0) {
-                if (c.ferror(fin) != 0) return error.IOFailed;
-                break;
-            }
-            if (@as(usize, @intCast(c.fwrite(&buf, 1, n, fout))) != n) return error.IOFailed;
-            sha.update(buf[0..n]);
-        }
+    const data_len: ?u64 = if (h.hooks_offset != 0)
+        h.hooks_offset - h.data_offset
+    else if (h.sig_size != 0)
+        h.sig_offset - h.data_offset
+    else
+        null;
+    try pipeExact(fin, fout, &sha, data_len);
+
+    if (h.hooks_offset != 0) {
+        const hooks_len: ?u64 = if (h.sig_size != 0) h.sig_offset - h.hooks_offset else null;
+        try pipeExact(fin, null, &sha, hooks_len);
     }
 
     if (!checksum.isZero(h.checksum)) {
         const got = sha.finalResult();
         if (!std.mem.eql(u8, &h.checksum, got[0..8])) return error.BadChecksum;
+    }
+}
+
+fn pipeExact(fin: *c.FILE, fout: ?*c.FILE, sha: *Sha256, len: ?u64) !void {
+    var buf: [64 * 1024]u8 = undefined;
+    if (len) |n| {
+        var remaining = n;
+        while (remaining > 0) {
+            const want: usize = @intCast(@min(remaining, buf.len));
+            const r: usize = @intCast(c.fread(&buf, 1, want, fin));
+            if (r == 0) return error.Truncated;
+            if (fout) |fo| {
+                if (@as(usize, @intCast(c.fwrite(&buf, 1, r, fo))) != r) return error.IOFailed;
+            }
+            sha.update(buf[0..r]);
+            remaining -= r;
+        }
+    } else {
+        while (true) {
+            const r: usize = @intCast(c.fread(&buf, 1, buf.len, fin));
+            if (r == 0) {
+                if (c.ferror(fin) != 0) return error.IOFailed;
+                return;
+            }
+            if (fout) |fo| {
+                if (@as(usize, @intCast(c.fwrite(&buf, 1, r, fo))) != r) return error.IOFailed;
+            }
+            sha.update(buf[0..r]);
+        }
     }
 }
 
@@ -583,10 +659,11 @@ fn validHeader() header.Header {
         .version = 1,
         .info_size = 18,
         .data_offset = 82,
+        .hooks_offset = 0,
         .sig_offset = 0,
         .sig_size = 0,
         .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 26,
+        .reserved = [_]u8{0} ** 18,
     };
 }
 

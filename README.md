@@ -10,27 +10,33 @@ An ARP (Advanced Release Package) write and read library.
 ┌─────────────────────────────────────────────────┐
 │ Offset 0-63: 64-byte header                     │
 │   - magic: "ARP\x01"                            │
-│   - version: u16 (current = 1)                  │
+│   - version: u16                                │
 │   - info_size: u32                              │
-│   - data_offset: u64                            │
+│   - data_offset: u64 (64 + info_size)           │
+│   - hooks_offset: u64 (0 = no hooks)            │
 │   - sig_offset: u64 (0 = unsigned)              │
 │   - sig_size: u32 (109 or 0)                    │
-│   - checksum: [8]u8 (sha256(info||data)[0..8])  │
-│   - reserved: [26]u8 (all zero)                 │
+│   - checksum: [8]u8 (sha256(info||data||hooks)) │
+│   - reserved: [18]u8 (all zero)                 │
 ├─────────────────────────────────────────────────┤
 │ Offset 64: .info metadata (TOML-like text)      │
 │   Length = info_size                            │
 ├─────────────────────────────────────────────────┤
 │ Offset data_offset: bin.tar.zst compressed data │
-│   Length = (sig_offset or EOF) - data_offset    │
+│   Length = (hooks_offset or end) - data_offset  │
+├─────────────────────────────────────────────────┤
+│ Offset hooks_offset: hooks scripts (tar.zst)    │
+│   Length = (sig_offset or EOF) - hooks_offset   │
 ├─────────────────────────────────────────────────┤
 │ Offset sig_offset: 109-byte Ed25519 signature   │
 │   Length = sig_size  (signed packages only)     │
 └─────────────────────────────────────────────────┘
 ```
 
-The checksum covers `.info` and `data`.
+The checksum covers `.info`, `data` and `hooks`.
 The signature covers `file[0..sig_offset)`.
+
+`hooks_offset == 0` means no hooks: `data` then runs to `sig_offset` (or EOF).
 
 ## Features
 
@@ -60,7 +66,6 @@ arp_free(pkg);
 
 - `arp_package_info/data/signature/header/key_id` return pointers **into the package buffer**; they stay valid until `arp_free`. Only the package itself needs `arp_free`; `arp_free(NULL)` is safe.
 - `data` stops at `sig_offset` for signed packages (only unsigned packages run to EOF). The signature accessor returns the raw 109-byte blob (not decoded).
-- `arp_open` performs **structural checks only** (format + bounds) and reads the whole file into memory. Integrity is a separate `arp_check_checksum(pkg)`; signature verification is separate too.
 
 Verification is a three-state query plus thin policy wrappers:
 
@@ -74,12 +79,6 @@ arp_verify_pkg(pkg, &st, kid);
 - `arp_verify_file(path, trusted_dir)` and `arp_verify_detached(blob, blob_len, data, data_len, trusted_dir)` are convenience wrappers: they map the status to `ARP_ERR_UNSIGNED` / `ARP_ERR_BAD_SIGNATURE` and, when `trusted_dir != NULL`, reject keys absent from `trusted_dir` (`<trusted_dir>/<key_id hex>`) with `ARP_ERR_UNTRUSTED_KEY`. `trusted_dir == NULL` verifies cryptography only.
 
 `struct arp_pack_opts` is ABI-forward-compatible: zero-initialize it and set `abi_version = 1`. Uninitialized or unknown versions fall back to defaults (`write_checksum = 1`).
-
-## Limitations
-
-- `arp_open` memory-maps the package (POSIX `mmap`) instead of copying it into memory, so opening large packages does not allocate proportionally to file size. The mapping is released by `arp_free`.
-- Verifying a signed package reads the whole message (Ed25519 hashes `file[0..sig_offset)`); this faults in the mapped pages but does not allocate a second copy.
-- Zig: `open(bytes)` is a zero-copy view (no allocator); the caller must keep `bytes` alive. `unpack` is the streaming/copying entry point whose `UnpackResult.info` is allocated and owned by the caller.
 
 ## License
 

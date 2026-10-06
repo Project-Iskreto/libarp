@@ -10,10 +10,11 @@ fn baseHeader() header.Header {
         .version = 1,
         .info_size = 0,
         .data_offset = header.HeaderSize,
+        .hooks_offset = 0,
         .sig_offset = 0,
         .sig_size = 0,
         .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 26,
+        .reserved = [_]u8{0} ** 18,
     };
 }
 

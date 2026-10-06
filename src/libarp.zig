@@ -10,22 +10,22 @@ pub const OpenResult = struct {
     header: header.Header,
     info: []const u8,
     data: []const u8,
+    hooks: []const u8,
     signature: ?[]const u8,
 };
 
 pub fn open(bytes: []const u8) !OpenResult {
     const h = try header.parseChecked(bytes, bytes.len);
     const info = bytes[header.HeaderSize .. header.HeaderSize + h.info_size];
-    const start: usize = @intCast(h.data_offset);
-    if (h.sig_size == 0) {
-        return .{ .header = h, .info = info, .data = bytes[start..], .signature = null };
-    }
-    const so: usize = @intCast(h.sig_offset);
+    const data_off: usize = @intCast(h.data_offset);
+    const content_end: usize = @intCast(h.contentEnd(bytes.len));
+    const data_end: usize = if (h.hooks_offset != 0) @intCast(h.hooks_offset) else content_end;
     return .{
         .header = h,
         .info = info,
-        .data = bytes[start..so],
-        .signature = bytes[so .. so + header.SignatureSize],
+        .data = bytes[data_off..data_end],
+        .hooks = if (h.hooks_offset != 0) bytes[data_end..content_end] else bytes[data_end..data_end],
+        .signature = if (h.sig_size != 0) bytes[content_end .. content_end + header.SignatureSize] else null,
     };
 }
 
@@ -39,7 +39,7 @@ test "packer.write writes header, info and data in order" {
 
     var w = std.Io.Writer.fixed(buf);
 
-    const h = try packer.write(&w, info, data, .{});
+    const h = try packer.write(&w, info, data, &.{}, .{});
 
     try std.testing.expectEqual(@as(u32, @intCast(info.len)), h.info_size);
     try std.testing.expectEqual(@as(u64, @intCast(64 + info.len)), h.data_offset);
@@ -58,7 +58,7 @@ test "packer/unpacker roundtrip" {
     defer std.testing.allocator.free(bytes_packed);
 
     var w1 = std.Io.Writer.fixed(bytes_packed);
-    _ = try packer.write(&w1, info, data, .{});
+    _ = try packer.write(&w1, info, data, &.{}, .{});
 
     const data_out = try std.testing.allocator.alloc(u8, data.len);
     defer std.testing.allocator.free(data_out);

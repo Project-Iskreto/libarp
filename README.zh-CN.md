@@ -10,27 +10,33 @@
 ┌────────────────────────────────────────┐
 │ 偏移 0-63：64B 头（Header）            │
 │   - magic: "ARP\x01"                   │
-│   - version: u16（当前 = 1）           │
+│   - version: u16                       │
 │   - info_size: u32                     │
-│   - data_offset: u64                   │
+│   - data_offset: u64（64+info_size）   │
+│   - hooks_offset: u64（0 = 无 hooks）  │
 │   - sig_offset: u64（0 = 未签名）      │
 │   - sig_size: u32（109 或 0）          │
-│   - checksum: [8]u8（sha256 前 8B）    │
-│   - reserved: [26]u8（全 0）           │
+│   - checksum: [8]u8                    │
+│   - reserved: [18]u8（全 0）           │
 ├────────────────────────────────────────┤
 │ 偏移 64：.info 元数据（类 TOML 文本）  │
 │   长度 = info_size                     │
 ├────────────────────────────────────────┤
 │ 偏移 data_offset：bin.tar.zst 压缩数据 │
-│   长度 = sig_offset - data_offset      │
+│   长度 = hooks_offset - data_offset    │
+├────────────────────────────────────────┤
+│ 偏移 hooks_offset：hooks 脚本          │
+│   长度 = sig_offset - hooks_offset     │
 ├────────────────────────────────────────┤
 │ 偏移 sig_offset：Ed25519 签名区        │
 │   长度 = sig_size（仅签名包）          │
 └────────────────────────────────────────┘
 ```
 
-checksum 覆盖 `.info` 与 `data`。
+checksum 覆盖 `.info`、`data` 与 `hooks`。
 签名覆盖 `file[0..sig_offset)`。
+
+`hooks_offset == 0` 表示无 hooks：`data` 直接到 `sig_offset`。
 
 ## 功能
 
@@ -60,7 +66,6 @@ arp_free(pkg);
 
 - `arp_package_info/data/signature/header/key_id` 返回的是**指向包缓冲的内部指针**，在 `arp_free` 前有效；只需 `arp_free` 释放包本身，`arp_free(NULL)` 安全。
 - `data` 对签名包**止于 `sig_offset`**（只有未签名包才到文件末尾）；签名访问器返回**原始 109 字节 blob**（不解码）。
-- `arp_open` 只做**结构性检查**（格式 + 边界），会把整个文件读入内存；完整性用 `arp_check_checksum(pkg)`，签名校验另算。
 
 校验采用三态查询 + 策略薄封装：
 
@@ -74,12 +79,6 @@ arp_verify_pkg(pkg, &st, kid);
 - `arp_verify_file(path, trusted_dir)` 与 `arp_verify_detached(blob, blob_len, data, data_len, trusted_dir)` 是便捷封装：把状态映射为 `ARP_ERR_UNSIGNED` / `ARP_ERR_BAD_SIGNATURE`；当 `trusted_dir != NULL` 时，`key_id` 不在 `trusted_dir`（`<trusted_dir>/<key_id 十六进制>`）则返回 `ARP_ERR_UNTRUSTED_KEY`。`trusted_dir == NULL` 时只验密码学。
 
 `struct arp_pack_opts` ABI 前向兼容：调用方零初始化并置 `abi_version = 1`；未初始化或未知版本走默认（`write_checksum = 1`）。
-
-## 限制
-
-- `arp_open` 用 **mmap**（POSIX）映射文件，不再复制进内存；打开大包不会按文件大小分配内存。映射由 `arp_free` 解除。
-- 验证签名包仍需读取整段消息（Ed25519 哈希 `file[0..sig_offset)`），会触发映射页的缺页，但不会额外分配一份拷贝。
-- Zig：`open(bytes)` 为零拷贝视图（无分配器），调用方需保证 `bytes` 存活；`unpack` 是流式/拷贝入口，`UnpackResult.info` 由调用方分配并负责释放。
 
 ## 许可证
 

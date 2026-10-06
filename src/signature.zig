@@ -90,6 +90,9 @@ pub fn sign(allocator: std.mem.Allocator, unsigned: []const u8, seed: [32]u8) ![
 
     const info = unsigned[header.HeaderSize .. header.HeaderSize + h.info_size];
     const data_off: usize = @intCast(h.data_offset);
+    const data_end: usize = if (h.hooks_offset != 0) @intCast(h.hooks_offset) else unsigned.len;
+    const data = unsigned[data_off..data_end];
+    const hooks = if (h.hooks_offset != 0) unsigned[data_end..unsigned.len] else unsigned[0..0];
 
     const out = try allocator.alloc(u8, unsigned.len + header.SignatureSize);
     errdefer allocator.free(out);
@@ -98,9 +101,10 @@ pub fn sign(allocator: std.mem.Allocator, unsigned: []const u8, seed: [32]u8) ![
         .version = h.version,
         .info_size = h.info_size,
         .data_offset = h.data_offset,
+        .hooks_offset = h.hooks_offset,
         .sig_offset = unsigned.len,
         .sig_size = header.SignatureSize,
-        .checksum = checksum.compute(info, unsigned[data_off..]),
+        .checksum = checksum.compute(info, data, hooks),
         .reserved = h.reserved,
     };
     const hdr_bytes = nh.serialize();
