@@ -48,12 +48,56 @@ pub fn parse(bytes: []const u8) !Blob {
 }
 
 pub fn verifyBlob(blob: []const u8, message: []const u8) VerifyResult {
+    var v = switch (beginStream(blob)) {
+        .status => |st| return .{ .status = st },
+        .ready => |sv| sv,
+    };
+    v.update(message);
+    return v.finish();
+}
+
+pub const StreamVerifier = struct {
+    inner: Ed25519.Verifier,
+    key_id: [8]u8,
+
+    pub fn update(self: *StreamVerifier, bytes: []const u8) void {
+        self.inner.update(bytes);
+    }
+
+    pub fn finish(self: *StreamVerifier) VerifyResult {
+        self.inner.verify() catch return .{ .status = .invalid };
+        return .{ .status = .valid, .key_id = self.key_id };
+    }
+};
+
+pub const StreamStart = union(enum) {
+    status: VerifyStatus,
+    ready: StreamVerifier,
+};
+
+pub fn beginStream(blob: []const u8) StreamStart {
     const parsed = parse(blob) catch return .{ .status = .invalid };
     const pk = Ed25519.PublicKey.fromBytes(parsed.pubkey) catch
         return .{ .status = .invalid };
-    const sig = Ed25519.Signature.fromBytes(parsed.signature);
-    sig.verify(message, pk) catch return .{ .status = .invalid };
-    return .{ .status = .valid, .key_id = parsed.key_id };
+    const inner = Ed25519.Signature.fromBytes(parsed.signature).verifier(pk) catch
+        return .{ .status = .invalid };
+    return .{ .ready = .{ .inner = inner, .key_id = parsed.key_id } };
+}
+
+pub fn verifyStream(r: *std.Io.Reader, blob: []const u8, len: u64) VerifyResult {
+    var v = switch (beginStream(blob)) {
+        .status => |st| return .{ .status = st },
+        .ready => |sv| sv,
+    };
+    var buf: [64 * 1024]u8 = undefined;
+    var remaining = len;
+    while (remaining > 0) {
+        const want: usize = @intCast(@min(remaining, buf.len));
+        r.readSliceAll(buf[0..want]) catch return .{ .status = .invalid };
+        v.update(buf[0..want]);
+        remaining -= want;
+    }
+    return v.finish();
 }
 
 pub fn verify(file: []const u8) VerifyResult {
@@ -114,4 +158,23 @@ pub fn sign(allocator: std.mem.Allocator, unsigned: []const u8, seed: [32]u8) ![
     const blob = try signBlob(seed, out[0..unsigned.len]);
     @memcpy(out[unsigned.len..], &blob);
     return out;
+}
+
+fn makeUnsigned(allocator: std.mem.Allocator, info: []const u8, data: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, header.HeaderSize + info.len + data.len);
+    const h = header.Header{
+        .version = 1,
+        .info_size = @intCast(info.len),
+        .data_offset = header.HeaderSize + info.len,
+        .hooks_offset = 0,
+        .sig_offset = 0,
+        .sig_size = 0,
+        .checksum = checksum.compute(info, data, &.{}),
+        .reserved = [_]u8{0} ** 18,
+    };
+    const hdr_bytes = h.serialize();
+    @memcpy(buf[0..header.HeaderSize], &hdr_bytes);
+    @memcpy(buf[header.HeaderSize .. header.HeaderSize + info.len], info);
+    @memcpy(buf[header.HeaderSize + info.len ..], data);
+    return buf;
 }

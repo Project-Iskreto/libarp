@@ -434,16 +434,45 @@ export fn arp_verify_mem(bytes: ?[*]const u8, len: usize, status: ?*CVerifyStatu
 }
 
 export fn arp_verify_file(path: [*:0]const u8, trusted_dir: ?[*:0]const u8) Err {
-    var pkg: ?*CPackage = null;
-    const rc = arp_open(path, &pkg);
-    if (rc != .ok) return rc;
-    defer arp_free(pkg);
+    return verifyFileStreaming(path, trusted_dir) catch |e| return codeOf(e);
+}
 
-    var st: CVerifyStatus = .invalid;
-    var kid: [8]u8 = [_]u8{0} ** 8;
-    const vr = arp_verify_pkg(pkg, &st, &kid);
-    if (vr != .ok) return vr;
-    return policy(st, kid, trusted_dir);
+fn verifyFileStreaming(path: [*:0]const u8, trusted_dir: ?[*:0]const u8) !Err {
+    const f = c.fopen(path, "rb") orelse return error.OpenFailed;
+    defer _ = c.fclose(f);
+
+    const file_size = try fileSize(f);
+
+    var hdr_bytes: [header.HeaderSize]u8 = undefined;
+    if (@as(usize, @intCast(c.fread(&hdr_bytes, 1, hdr_bytes.len, f))) != hdr_bytes.len)
+        return error.Truncated;
+    const h = try header.parseChecked(&hdr_bytes, @intCast(file_size));
+
+    if (h.sig_size == 0) return .unsigned;
+
+    if (c.fseek(f, @intCast(h.sig_offset), c.SEEK_SET) != 0) return error.IOFailed;
+    var blob: [header.SignatureSize]u8 = undefined;
+    if (@as(usize, @intCast(c.fread(&blob, 1, blob.len, f))) != blob.len)
+        return error.Truncated;
+
+    if (c.fseek(f, 0, c.SEEK_SET) != 0) return error.IOFailed;
+    var sv = switch (signature.beginStream(&blob)) {
+        .status => |st| return policy(toStatus(st), [_]u8{0} ** 8, trusted_dir),
+        .ready => |v| v,
+    };
+
+    var buf: [64 * 1024]u8 = undefined;
+    var remaining: u64 = h.sig_offset;
+    while (remaining > 0) {
+        const want: usize = @intCast(@min(remaining, buf.len));
+        const n: usize = @intCast(c.fread(&buf, 1, want, f));
+        if (n == 0) return error.Truncated;
+        sv.update(buf[0..n]);
+        remaining -= n;
+    }
+
+    const res = sv.finish();
+    return policy(toStatus(res.status), res.key_id orelse [_]u8{0} ** 8, trusted_dir);
 }
 
 fn policy(st: CVerifyStatus, kid: [8]u8, trusted_dir: ?[*:0]const u8) Err {

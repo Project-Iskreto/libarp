@@ -101,8 +101,11 @@ pub fn build(b: *std.Build) void {
     const run_cabi_tests = b.addRunArtifact(cabi_tests);
     const verifier_tests = b.addTest(.{ .root_module = verifier });
     const run_verifier_tests = b.addRunArtifact(verifier_tests);
+    const signature_tests = b.addTest(.{ .root_module = signature });
+    const run_signature_tests = b.addRunArtifact(signature_tests);
     const test_step = b.step("test", "Run libarp tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_cabi_tests.step);
     test_step.dependOn(&run_verifier_tests.step);
+    test_step.dependOn(&run_signature_tests.step);
 }
