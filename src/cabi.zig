@@ -7,14 +7,7 @@ const signature = @import("signature");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const c = @cImport({
-    @cInclude("stdio.h");
-    @cInclude("stdlib.h");
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-    @cInclude("sys/mman.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("c");
 
 pub const Err = enum(c_int) {
     ok = 0,
@@ -212,8 +205,8 @@ fn packStreamInternal(out_path: [*:0]const u8, info: []const u8, data_path: [*:0
         .hooks_offset = if (hooks_size == 0) 0 else data_offset + data_size,
         .sig_offset = 0,
         .sig_size = 0,
-        .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 18,
+        .checksum = @splat(0),
+        .reserved = @splat(0),
     };
 
     const fout = c.fopen(out_path, "wb") orelse return error.OpenFailed;
@@ -419,7 +412,7 @@ export fn arp_verify_pkg(pkg: ?*CPackage, status: ?*CVerifyStatus, out_key_id: ?
     const st = status orelse return .bad_arg;
     const r = signature.verify(p.bytes[0..p.len]);
     st.* = toStatus(r.status);
-    if (out_key_id) |k| k.* = r.key_id orelse [_]u8{0} ** 8;
+    if (out_key_id) |k| k.* = r.key_id orelse @splat(0);
     return .ok;
 }
 
@@ -429,7 +422,7 @@ export fn arp_verify_mem(bytes: ?[*]const u8, len: usize, status: ?*CVerifyStatu
     if (len < header.HeaderSize) return .truncated;
     const r = signature.verify(b[0..len]);
     st.* = toStatus(r.status);
-    if (out_key_id) |k| k.* = r.key_id orelse [_]u8{0} ** 8;
+    if (out_key_id) |k| k.* = r.key_id orelse @splat(0);
     return .ok;
 }
 
@@ -457,7 +450,7 @@ fn verifyFileStreaming(path: [*:0]const u8, trusted_dir: ?[*:0]const u8) !Err {
 
     if (c.fseek(f, 0, c.SEEK_SET) != 0) return error.IOFailed;
     var sv = switch (signature.beginStream(&blob)) {
-        .status => |st| return policy(toStatus(st), [_]u8{0} ** 8, trusted_dir),
+        .status => |st| return policy(toStatus(st), @splat(0), trusted_dir),
         .ready => |v| v,
     };
 
@@ -472,7 +465,7 @@ fn verifyFileStreaming(path: [*:0]const u8, trusted_dir: ?[*:0]const u8) !Err {
     }
 
     const res = sv.finish();
-    return policy(toStatus(res.status), res.key_id orelse [_]u8{0} ** 8, trusted_dir);
+    return policy(toStatus(res.status), res.key_id orelse @splat(0), trusted_dir);
 }
 
 fn policy(st: CVerifyStatus, kid: [8]u8, trusted_dir: ?[*:0]const u8) Err {
@@ -521,7 +514,7 @@ export fn arp_verify_detached(
         .unsigned, .invalid => .bad_signature,
         .valid => blk: {
             if (trusted_dir) |dir| {
-                if (!keyInDir(dir, r.key_id orelse [_]u8{0} ** 8)) break :blk .untrusted_key;
+                if (!keyInDir(dir, r.key_id orelse @splat(0))) break :blk .untrusted_key;
             }
             break :blk .ok;
         },
@@ -691,8 +684,8 @@ fn validHeader() header.Header {
         .hooks_offset = 0,
         .sig_offset = 0,
         .sig_size = 0,
-        .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 18,
+        .checksum = @splat(0),
+        .reserved = @splat(0),
     };
 }
 
@@ -754,7 +747,7 @@ test "cabi arp_header_parse validates" {
     var short: [10]u8 = undefined;
     try std.testing.expectEqual(Err.truncated, arp_header_parse(&short, short.len, &ch));
 
-    var garbage = [_]u8{'X'} ** 64;
+    var garbage: [64]u8 = @splat('X');
     try std.testing.expectEqual(Err.bad_magic, arp_header_parse(&garbage, garbage.len, &ch));
 
     var bad_ver = h;
@@ -796,7 +789,7 @@ test "cabi arp_unpack_stream extracts data" {
 test "cabi read side errors" {
     const garbage_path = "zlibarp_cabi_bad.arp";
     defer _ = c.remove(garbage_path);
-    var garbage = [_]u8{'X'} ** 64;
+    var garbage: [64]u8 = @splat('X');
     try writePathBytes(garbage_path, &garbage);
     try std.testing.expectEqual(Err.bad_magic, arp_unpack_stream(garbage_path, "zlibarp_cabi_never.bin"));
 

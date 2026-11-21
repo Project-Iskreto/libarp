@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 fn setupImports(
     root: *std.Build.Module,
@@ -60,12 +61,20 @@ pub fn build(b: *std.Build) void {
     });
     setupImports(libarp_mod, header, checksum, packer, unpacker, verifier, signature);
 
+    const translate_c = b.dependency("translate_c", .{});
+    const translator: Translator = .init(translate_c, .{
+        .c_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const cabi_mod = b.createModule(.{
         .root_source_file = b.path("src/cabi.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+    cabi_mod.addImport("c", translator.mod);
     cabi_mod.addImport("header", header);
     cabi_mod.addImport("checksum", checksum);
     cabi_mod.addImport("signature", signature);

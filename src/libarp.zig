@@ -75,7 +75,7 @@ test "packer/unpacker roundtrip" {
 }
 
 test "unpacker rejects bad magic" {
-    const garbage = [_]u8{'X'} ** 64;
+    const garbage: [64]u8 = @splat('X');
     var r = std.Io.Reader.fixed(&garbage);
     var empty: [0]u8 = .{};
     var w = std.Io.Writer.fixed(&empty);

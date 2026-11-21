@@ -170,7 +170,7 @@ fn makeUnsigned(allocator: std.mem.Allocator, info: []const u8, data: []const u8
         .sig_offset = 0,
         .sig_size = 0,
         .checksum = checksum.compute(info, data, &.{}),
-        .reserved = [_]u8{0} ** 18,
+        .reserved = @splat(0),
     };
     const hdr_bytes = h.serialize();
     @memcpy(buf[0..header.HeaderSize], &hdr_bytes);

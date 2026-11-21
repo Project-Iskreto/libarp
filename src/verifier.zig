@@ -13,8 +13,8 @@ fn baseHeader() header.Header {
         .hooks_offset = 0,
         .sig_offset = 0,
         .sig_size = 0,
-        .checksum = [_]u8{0} ** 8,
-        .reserved = [_]u8{0} ** 18,
+        .checksum = @splat(0),
+        .reserved = @splat(0),
     };
 }
 
